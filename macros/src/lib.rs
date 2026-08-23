@@ -763,6 +763,7 @@ fn emit_condition_assert(
     let details = details_json(&input.details);
 
     let fmt_args = details_format_args(&msg, &input.details);
+    let plabel = patina_label(&msg);
     let assert_call = match kind {
         ConditionAssertKind::Assert => quote! { assert!(__turso_cond, #fmt_args); },
         ConditionAssertKind::DebugAssert => {
@@ -789,7 +790,11 @@ fn emit_condition_assert(
                 }
             }
             #[cfg(not(antithesis))]
-            { #assert_call }
+            {
+                #[cfg(patina)]
+                { ::patina_dst::always!(__turso_cond, #plabel); }
+                #assert_call
+            }
         }
     }
 }
@@ -836,6 +841,7 @@ fn emit_boolean_guidance(
     };
 
     let fmt_args = details_format_args(&input.message, &input.details);
+    let plabel = patina_label(&input.message);
     let env_check = antithesis_env_check();
     quote! {
         {
@@ -852,7 +858,11 @@ fn emit_boolean_guidance(
                 }
             }
             #[cfg(not(antithesis))]
-            { assert!(__turso_cond, #fmt_args); }
+            {
+                #[cfg(patina)]
+                { ::patina_dst::always!(__turso_cond, #plabel); }
+                assert!(__turso_cond, #fmt_args);
+            }
         }
     }
 }
@@ -873,6 +883,7 @@ fn emit_always_comparison(
     let prefixed = prefix_message(file_path, &msg);
     let details = details_json(&input.details);
     let fmt_args = details_format_args(&msg, &input.details);
+    let plabel = patina_label(&msg);
 
     let fallback_assert = match fallback {
         ComparisonFallback::AssertOp => {
@@ -903,7 +914,11 @@ fn emit_always_comparison(
                 }
             }
             #[cfg(not(antithesis))]
-            { #fallback_assert }
+            {
+                #[cfg(patina)]
+                { ::patina_dst::always!(__turso_left #op_tokens __turso_right, #plabel); }
+                #fallback_assert
+            }
         }
     }
 }
@@ -923,6 +938,7 @@ fn emit_sometimes_comparison(
     let prefixed = prefix_message(file_path, &msg);
     let details = details_json(&input.details);
     let debug_check = details_debug_check(&input.details);
+    let plabel = patina_label(&msg);
 
     let env_check = antithesis_env_check();
     quote! {
@@ -936,6 +952,8 @@ fn emit_sometimes_comparison(
             }
             #[cfg(not(antithesis))]
             {
+                #[cfg(patina)]
+                { ::patina_dst::sometimes!(__turso_left #op_tokens __turso_right, #plabel); }
                 let _ = (__turso_left, __turso_right);
                 #debug_check
             }
@@ -1096,6 +1114,7 @@ pub fn turso_assert_sometimes(input: TokenStream) -> TokenStream {
         .unwrap_or_else(|| expr_to_lit_str(cond));
     let prefixed = prefix_message(&file_path, &msg);
     let details = details_json(&input.details);
+    let plabel = patina_label(&msg);
 
     let debug_check = details_debug_check(&input.details);
     let env_check = antithesis_env_check();
@@ -1109,6 +1128,8 @@ pub fn turso_assert_sometimes(input: TokenStream) -> TokenStream {
             }
             #[cfg(not(antithesis))]
             {
+                #[cfg(patina)]
+                { ::patina_dst::sometimes!(__turso_cond, #plabel); }
                 let _ = __turso_cond;
                 #debug_check
             }
@@ -1233,6 +1254,7 @@ pub fn turso_assert_reachable(input: TokenStream) -> TokenStream {
     let prefixed = prefix_message(&file_path, &input.message);
     let details = details_json(&input.details);
     let debug_check = details_debug_check(&input.details);
+    let plabel = patina_label(&input.message);
 
     let env_check = antithesis_env_check();
     quote! {
@@ -1244,6 +1266,8 @@ pub fn turso_assert_reachable(input: TokenStream) -> TokenStream {
             }
             #[cfg(not(antithesis))]
             {
+                #[cfg(patina)]
+                { ::patina_dst::reachable!(#plabel); }
                 #debug_check
             }
         }
@@ -1288,6 +1312,7 @@ pub fn turso_assert_unreachable(input: TokenStream) -> TokenStream {
     let prefixed = prefix_message(&file_path, msg);
     let details = details_json(&input.details);
     let fmt_args = details_format_args(msg, &input.details);
+    let plabel = patina_label(msg);
 
     let env_check = antithesis_env_check();
     quote! {
@@ -1302,7 +1327,11 @@ pub fn turso_assert_unreachable(input: TokenStream) -> TokenStream {
                 std::process::exit(0);
             }
             #[cfg(not(antithesis))]
-            { unreachable!(#fmt_args) }
+            {
+                #[cfg(patina)]
+                { ::patina_dst::always!(false, #plabel); }
+                unreachable!(#fmt_args)
+            }
         }
     }
     .into()
@@ -1695,4 +1724,24 @@ fn get_caller_file(input: &TokenStream) -> String {
 
 fn prefix_message(file_path: &str, msg: &LitStr) -> LitStr {
     LitStr::new(&format!("[{}] {}", file_path, msg.value()), msg.span())
+}
+
+/// Under a Patina deterministic-simulation build (`--cfg patina`, injected by
+/// `cargo patina build`), every property is ALSO mirrored into patina's
+/// cooperative-SUT SDK (`patina_dst::always!` / `sometimes!` / `reachable!`),
+/// so a violated invariant is a structured verdict on the run and coverage
+/// oracles are tracked across a campaign. The SDK label is
+/// `file:line:column:message` (sanitized to a single whitespace-free token so
+/// the runtime's space-delimited PATINA_SDK_REPORT line round-trips), built
+/// from the SAME expansion context as the SDK's own call-site identity, so one
+/// source site maps to exactly one label. Cfg-stripped in every non-Patina build.
+fn patina_label(msg: &LitStr) -> proc_macro2::TokenStream {
+    let msg: String = msg
+        .value()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':') { c } else { '_' })
+        .collect();
+    quote! {
+        ::core::concat!(::core::file!(), ":", ::core::line!(), ":", ::core::column!(), ":", #msg)
+    }
 }

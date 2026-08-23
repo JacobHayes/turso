@@ -1,0 +1,22 @@
+[package]
+name = "turso-patina-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone: deliberately NOT a member of the turso workspace, so patina can
+# build it as its own package with its own lockfile.
+[workspace]
+
+[dependencies]
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing = "0.1.41"
+turso_core = { path = "../../core", features = ["pure-rust-crypto"] }
+patina-dst = { path = "/home/jacobhayes/src/github.com/JacobHayes/patina/crates/patina" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(patina)', 'cfg(dst)', 'cfg(patina_shim)'] }
+
+[profile.dev]
+# Keep debug_assert! and overflow checks: they are free oracles under DST.
+debug = true
